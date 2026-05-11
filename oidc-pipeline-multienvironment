@@ -1,0 +1,139 @@
+name: IaC Terraform Lambda Deploy
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+    paths:
+      - 'environment/**'
+      - 'module/**'
+      - 'codigo_lambda/**'
+      - 'stellar-layer/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PROJECT: ${{ github.event.repository.name }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+jobs:
+
+  terraform-deploy:
+    runs-on: cicd-ikigii
+
+    # ---------------------------------------------------------
+    # Execute only if:
+    # - PR was merged
+    # - PR contains a valid deployment label
+    # ---------------------------------------------------------
+    if: >
+      github.event.pull_request.merged == true &&
+      (
+        contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-prod') ||
+        contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-qa') ||
+        contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-dev')
+      )
+
+    env:
+
+      # ---------------------------------------------------------
+      # Select Terraform environment dynamically
+      # ---------------------------------------------------------
+      TF_ENV: >-
+        ${{
+          contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-prod') && 'production' ||
+          contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-qa') && 'qa' ||
+          contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-dev') && 'dev'
+        }}
+
+      # ---------------------------------------------------------
+      # Select AWS IAM Role dynamically
+      # ---------------------------------------------------------
+      AWS_ROLE_ARN: >-
+        ${{
+          contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-prod') && secrets.AWS_TOWERBANK_PROD_ROLE_ARN ||
+          contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-qa') && secrets.AWS_TOWERBANK_QA_ROLE_ARN ||
+          contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-dev') && secrets.AWS_TOWERBANK_DEV_ROLE_ARN
+        }}
+
+    steps:
+
+      # ---------------------------------------------------------
+      # Checkout Repository
+      # ---------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # ---------------------------------------------------------
+      # Show deployment configuration
+      # ---------------------------------------------------------
+      - name: Show deployment configuration
+        run: |
+          echo "Terraform Environment: ${TF_ENV}"
+          echo "Terraform tfvars file: ${TF_ENV}.tfvars"
+          echo "AWS Region: ${AWS_REGION}"
+
+      # ---------------------------------------------------------
+      # Configure AWS Credentials (OIDC)
+      # ---------------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # ---------------------------------------------------------
+      # Terraform Init
+      # ---------------------------------------------------------
+      - name: Terraform Init
+        working-directory: ./environment
+        run: | 
+          terraform init \
+            -backend-config="backend/${TF_ENV}.hcl" \
+            -input=false
+
+      # ---------------------------------------------------------
+      # Terraform Format Validation
+      # ---------------------------------------------------------
+      # - name: Terraform Format Check
+      #   working-directory: ./environment
+      #   run: terraform fmt -check
+
+      # ---------------------------------------------------------
+      # Terraform Validate
+      # ---------------------------------------------------------
+      # - name: Terraform Validate
+      #   working-directory: ./environment
+      #   run: terraform validate
+
+      # ---------------------------------------------------------
+      # Terraform Plan
+      # ---------------------------------------------------------
+      - name: Terraform Plan
+        working-directory: ./environment
+        run: |
+          terraform plan \
+            -var-file="${TF_ENV}.tfvars" \
+            -input=false \
+            -out="main.tfplan"
+
+      # ---------------------------------------------------------
+      # Terraform Apply
+      # ---------------------------------------------------------
+      - name: Terraform Apply
+        working-directory: ./environment
+        run: terraform apply -auto-approve "main.tfplan"
+
+      # ---------------------------------------------------------
+      # Cleanup Workspace
+      # ---------------------------------------------------------
+      - name: Clean workspace
+        if: always()
+        run: |
+          echo "Cleaning workspace..."
+          rm -rf ${{ github.workspace }}/*
